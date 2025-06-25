@@ -1,6 +1,5 @@
 generator client {
-  provider        = "prisma-client-js"
-  previewFeatures = ["pgvector"]
+  provider = "prisma-client-js"
 }
 
 datasource db {
@@ -18,10 +17,11 @@ model Resource {
 }
 
 model Embedding {
-  id         String   @id @default(uuid())
+  id         String                 @id @default(uuid())
   content    String
-  embedding  Vector   @vector(1536)
-  resource   Resource @relation(fields: [resourceId], references: [id])
+  embedding  Unsupported("vector(1536)")
+  resource   Resource               @relation(fields: [resourceId], references: [id])
   resourceId String
   metadata   Json?
+  createdAt  DateTime               @default(now())
 }
