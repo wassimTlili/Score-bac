@@ -1,75 +1,63 @@
-import { OpenAI } from 'openai';
+// Add this to your existing @/lib/azureOpenAI.js file
 
-// Create Azure OpenAI client with proper configuration
-const openai = new OpenAI({
-  apiKey: process.env.AZURE_OPENAI_API_KEY, 
-  baseURL: `${process.env.AZURE_OPENAI_TARGET}/openai/deployments`,
-  defaultQuery: { 'api-version': '2024-02-01' },
-  defaultHeaders: {
-    'api-key': process.env.AZURE_OPENAI_API_KEY,
-  },
+import { embed, generateText, streamText } from 'ai';
+import { createAzure } from '@ai-sdk/azure';
+
+export const azureProvider = createAzure({
+  apiKey: process.env.AZURE_OPENAI_API_KEY,
+  baseURL: process.env.AZURE_OPENAI_TARGET,
 });
 
 export async function generateEmbedding(input) {
   try {
-    // Validate environment variables
-    if (!process.env.AZURE_OPENAI_API_KEY) {
-      throw new Error('AZURE_OPENAI_API_KEY environment variable is missing');
-    }
-    if (!process.env.AZURE_OPENAI_TARGET) {
-      throw new Error('AZURE_OPENAI_TARGET environment variable is missing');
-    }
-    if (!process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT) {
-      throw new Error('AZURE_OPENAI_EMBEDDING_DEPLOYMENT environment variable is missing');
-    }
-
-    console.log('Generating embedding for:', input.substring(0, 100) + '...');
-    
-    const response = await openai.embeddings.create({
-      model: process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
-      input: input,
+    const { embedding } = await embed({
+      model: azureProvider.embedding(process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT),
+      value: input,
     });
-
-    console.log('Embedding generated successfully');
-    return { embedding: response.data[0].embedding };
+    return { embedding };
   } catch (error) {
     console.error('Embedding generation error:', error);
-    throw error;
+    // If embed doesn't work, let's try the direct approach
+    try {
+      const embeddingModel = azureProvider.embedding(process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT);
+      const result = await embeddingModel.doEmbed({ values: [input] });
+      return { embedding: result.embeddings[0] };
+    } catch (fallbackError) {
+      console.error('Fallback embedding error:', fallbackError);
+      throw error;
+    }
   }
 }
 
 export async function generateChatResponse(messages) {
   try {
-    // Validate environment variables
-    if (!process.env.AZURE_OPENAI_API_KEY) {
-      throw new Error('AZURE_OPENAI_API_KEY environment variable is missing');
-    }
-    if (!process.env.AZURE_OPENAI_TARGET) {
-      throw new Error('AZURE_OPENAI_TARGET environment variable is missing');
-    }
-    if (!process.env.AZURE_OPENAI_CHAT_DEPLOYMENT) {
-      throw new Error('AZURE_OPENAI_CHAT_DEPLOYMENT environment variable is missing');
-    }
-
-    console.log('Generating chat response...');
-    
-    const response = await openai.chat.completions.create({
-      model: process.env.AZURE_OPENAI_CHAT_DEPLOYMENT,
+    const { text } = await generateText({
+      model: azureProvider(process.env.AZURE_OPENAI_CHAT_DEPLOYMENT || process.env.AZURE_OPENAI_DEPLOYMENT),
       messages: messages,
       temperature: 0.7,
-      max_tokens: 500,
+      maxTokens: 1000,
     });
-
-    console.log('Chat response generated successfully');
-    return { text: response.choices[0].message.content };
+    
+    return { text };
   } catch (error) {
-    console.error('Chat generation error:', error);
+    console.error('Chat response generation error:', error);
     throw error;
   }
 }
 
-// For backward compatibility with the AI SDK approach
-export const azureProvider = {
-  chat: (model) => ({ model }),
-  embedding: (model) => ({ model })
-};
+// New streaming function using ai SDK
+export async function generateChatResponseStream(messages) {
+  try {
+    const result = await streamText({
+      model: azureProvider(process.env.AZURE_OPENAI_CHAT_DEPLOYMENT || process.env.AZURE_OPENAI_DEPLOYMENT),
+      messages: messages,
+      temperature: 0.7,
+      maxTokens: 1000,
+    });
+    
+    return result.textStream;
+  } catch (error) {
+    console.error('Streaming error:', error);
+    throw new Error(`Streaming failed: ${error.message}`);
+  }
+}

@@ -1,5 +1,4 @@
 'use client';
-
 import { useState } from 'react';
 import { Send, Bot, User, MessageCircle, AlertCircle, BookOpen } from 'lucide-react';
 
@@ -15,10 +14,20 @@ export default function Chatbot() {
 
     const userMessage = { role: 'user', content: input };
     setMessages(prev => [...prev, userMessage]);
-    const currentInput = input;
+    const currentInput = input.trim();
     setInput('');
     setIsLoading(true);
     setError('');
+
+    // Add a placeholder message for streaming response
+    const botMessageId = Date.now();
+    const botMessage = {
+      id: botMessageId,
+      role: 'assistant',
+      content: '',
+      isStreaming: true
+    };
+    setMessages(prev => [...prev, botMessage]);
 
     try {
       const response = await fetch('/api/chat', {
@@ -30,31 +39,126 @@ export default function Chatbot() {
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        let errorMessage = `HTTP error! status: ${response.status}`;
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.error || errorMessage;
+        } catch (parseError) {
+          try {
+            const errorText = await response.text();
+            if (errorText) {
+              try {
+                const parsed = JSON.parse(errorText);
+                errorMessage = parsed.error || errorText;
+              } catch {
+                errorMessage = errorText;
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
+        throw new Error(errorMessage);
       }
 
-      const data = await response.json();
-      
-      if (data.error) {
-        throw new Error(data.error);
-      }
+      // Check if response is streamed
+      const contentType = response.headers.get('content-type');
+      if (contentType && contentType.includes('text/stream')) {
+        // Handle streaming response
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let fullResponse = '';
 
-      const botMessage = { 
-        role: 'assistant', 
-        content: data.answer || 'Je n\'ai pas pu trouver une réponse appropriée à votre question.' 
-      };
-      setMessages(prev => [...prev, botMessage]);
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n');
+
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                const data = line.slice(6);
+                if (data === '[DONE]') {
+                  break;
+                }
+                try {
+                  const parsed = JSON.parse(data);
+                  if (parsed.content) {
+                    fullResponse += parsed.content;
+                    // Update the streaming message
+                    setMessages(prev => prev.map(msg => 
+                      msg.id === botMessageId 
+                        ? { ...msg, content: fullResponse }
+                        : msg
+                    ));
+                  }
+                } catch (parseError) {
+                  // Handle non-JSON chunks
+                  if (data.trim()) {
+                    fullResponse += data;
+                    setMessages(prev => prev.map(msg => 
+                      msg.id === botMessageId 
+                        ? { ...msg, content: fullResponse }
+                        : msg
+                    ));
+                  }
+                }
+              }
+            }
+          }
+        } finally {
+          reader.releaseLock();
+          // Mark streaming as complete
+          setMessages(prev => prev.map(msg => 
+            msg.id === botMessageId 
+              ? { ...msg, isStreaming: false }
+              : msg
+          ));
+        }
+      } else {
+        // Handle regular JSON response (fallback)
+        const data = await response.json();
+        if (data.error) {
+          throw new Error(data.error);
+        }
+        const responseContent = data.answer || "Je n'ai pas pu trouver une réponse appropriée à votre question.";
+        setMessages(prev => prev.map(msg => 
+          msg.id === botMessageId 
+            ? { ...msg, content: responseContent, isStreaming: false }
+            : msg
+        ));
+      }
     } catch (error) {
-      console.error('Chat error:', error);
-      setError(error.message);
-      const errorMessage = { 
-        role: 'assistant', 
-        content: 'Désolé, une erreur s\'est produite. Veuillez réessayer.' 
+      // Remove the placeholder message and add error message
+      setMessages(prev => prev.filter(msg => msg.id !== botMessageId));
+
+      let errorMsg = '';
+      if (typeof error === 'string') {
+        errorMsg = error;
+      } else if (error instanceof Error) {
+        errorMsg = error.message;
+      } else if (typeof error === 'object' && error !== null) {
+        errorMsg = error.error || error.message || JSON.stringify(error);
+      } else {
+        errorMsg = 'Une erreur inconnue est survenue.';
+      }
+      setError(errorMsg);
+
+      const errorMessage = {
+        role: 'assistant',
+        content: `Désolé, une erreur s'est produite: ${errorMsg}. Veuillez réessayer.`
       };
       setMessages(prev => [...prev, errorMessage]);
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handleQuestionClick = (question) => {
+    setInput(question);
+    setError('');
   };
 
   const clearChat = () => {
@@ -97,10 +201,8 @@ export default function Chatbot() {
           </div>
         </div>
       </div>
-
       <div className="max-w-6xl mx-auto px-6 py-6">
         <div className="grid lg:grid-cols-4 gap-6">
-          
           {/* Sidebar with sample questions */}
           <div className="lg:col-span-1">
             <div className="bg-slate-800/30 backdrop-blur-sm rounded-2xl border border-slate-700 p-6 h-fit">
@@ -112,20 +214,24 @@ export default function Chatbot() {
                 {sampleQuestions.map((question, index) => (
                   <button
                     key={index}
-                    onClick={() => setInput(question)}
+                    onClick={() => handleQuestionClick(question)}
                     className="w-full text-left p-3 text-sm text-slate-300 hover:text-white bg-slate-700/30 hover:bg-slate-700/50 rounded-lg border border-slate-600/50 hover:border-slate-500 transition-all duration-200"
                   >
                     {question}
                   </button>
                 ))}
               </div>
+              {process.env.NODE_ENV === 'development' && (
+                <div className="mt-6 p-3 bg-slate-700/20 rounded-lg text-xs text-slate-400">
+                  <div>Environment: {process.env.NODE_ENV}</div>
+                  <div>API URL: /api/chat</div>
+                </div>
+              )}
             </div>
           </div>
-
           {/* Main Chat Area */}
           <div className="lg:col-span-3">
             <div className="bg-slate-800/30 backdrop-blur-sm rounded-2xl border border-slate-700 shadow-xl h-[600px] flex flex-col">
-              
               {/* Messages Area */}
               <div className="flex-1 overflow-y-auto p-6 space-y-6">
                 {messages.length === 0 ? (
@@ -136,7 +242,7 @@ export default function Chatbot() {
                     <h2 className="text-2xl font-semibold mb-3 text-white">Bienvenue sur Guide El Bac!</h2>
                     <p className="text-lg mb-2">Votre assistant intelligent pour l'orientation post-bac</p>
                     <p className="text-sm max-w-md mx-auto">
-                      Posez-moi des questions sur les scores du Bac, l'orientation universitaire, 
+                      Posez-moi des questions sur les scores du Bac, l'orientation universitaire,
                       les spécialités disponibles et bien plus encore.
                     </p>
                   </div>
@@ -149,11 +255,16 @@ export default function Chatbot() {
                         </div>
                       )}
                       <div className={`max-w-[75%] px-6 py-4 rounded-2xl ${
-                        message.role === 'user' 
-                          ? 'bg-gradient-to-r from-emerald-500 via-cyan-500 to-blue-600 text-white shadow-lg' 
+                        message.role === 'user'
+                          ? 'bg-gradient-to-r from-emerald-500 via-cyan-500 to-blue-600 text-white shadow-lg'
                           : 'bg-slate-700/50 text-slate-100 border border-slate-600/50 shadow-sm'
                       }`}>
-                        <p className="leading-relaxed whitespace-pre-wrap">{message.content}</p>
+                        <p className="leading-relaxed whitespace-pre-wrap">
+                          {message.content}
+                          {message.isStreaming && (
+                            <span className="inline-block w-2 h-4 bg-emerald-400 ml-1 animate-pulse"></span>
+                          )}
+                        </p>
                       </div>
                       {message.role === 'user' && (
                         <div className="w-10 h-10 bg-gradient-to-r from-slate-600 to-slate-700 rounded-full flex items-center justify-center flex-shrink-0 shadow-lg">
@@ -163,7 +274,6 @@ export default function Chatbot() {
                     </div>
                   ))
                 )}
-                
                 {isLoading && (
                   <div className="flex gap-4 justify-start">
                     <div className="w-10 h-10 bg-gradient-to-r from-emerald-400 via-cyan-400 to-blue-500 rounded-full flex items-center justify-center flex-shrink-0 shadow-lg">
@@ -181,19 +291,19 @@ export default function Chatbot() {
                     </div>
                   </div>
                 )}
-
                 {error && (
                   <div className="flex gap-4 justify-start">
                     <div className="w-10 h-10 bg-red-500/20 border border-red-500/30 rounded-full flex items-center justify-center flex-shrink-0">
                       <AlertCircle className="w-5 h-5 text-red-400" />
                     </div>
                     <div className="bg-red-500/10 border border-red-500/30 px-6 py-4 rounded-2xl">
-                      <p className="text-red-300 text-sm">Erreur: {error}</p>
+                      <p className="text-red-300 text-sm">
+                        Erreur: {error}
+                      </p>
                     </div>
                   </div>
                 )}
               </div>
-
               {/* Input Area */}
               <div className="border-t border-slate-700 p-6">
                 <div className="flex gap-4">
